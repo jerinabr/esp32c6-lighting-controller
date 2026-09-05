@@ -19,19 +19,18 @@
 #include "portmacro.h"
 
 /*
-    Definitions
+    Configuration Settings
 */
-#define WIFI_SSID   "Abrahome"
-#define WIFI_PASS   "Tiramisu0621"
-
-#define MAX_CONNECT_RETRY_COUNT 5
+#define WIFI_SSID                   CONFIG_WIFI_SSID
+#define WIFI_PASS                   CONFIG_WIFI_PASS
+#define WIFI_MAX_RECONNECT_ATTEMPTS CONFIG_WIFI_MAX_RECONNECT_ATTEMPTS
 
 #define WIFI_CONNECT_FAILED_BIT     BIT1
 #define WIFI_CONNECT_SUCCESS_BIT    BIT0
 
 static EventGroupHandle_t wifi_event_group;
 
-static uint8_t connect_retry_count = 0;
+static uint8_t reconnect_attempt_count = 0;
 
 /*!
     @brief Callback for default events
@@ -60,9 +59,9 @@ static void default_event_handler(
                 happens, indicate in the event group that the connection
                 failed. */
             case WIFI_EVENT_STA_DISCONNECTED: {
-                if (connect_retry_count < MAX_CONNECT_RETRY_COUNT) {
+                if (reconnect_attempt_count < WIFI_MAX_RECONNECT_ATTEMPTS) {
                     esp_wifi_connect();
-                    connect_retry_count++;
+                    reconnect_attempt_count++;
                     ESP_LOGI(
                         "main",
                         "Lost Wi-Fi connection. Reconnecting..."
@@ -98,7 +97,7 @@ static void default_event_handler(
                     WIFI_CONNECT_SUCCESS_BIT
                 );
                 /* Reset the retry count once connected to WIFI */
-                connect_retry_count = 0;
+                reconnect_attempt_count = 0;
                 break;
             }
             /* Log any other event. I'll need to compare the event_id printed to

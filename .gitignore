@@ -1,4 +1,8 @@
 # Files
+## Build Files
+sdkconfig
+sdkconfig.old
+
 ## Misc
 dependencies.lock
 

@@ -1,0 +1,24 @@
+menu "Main Configuration"
+    
+    # Configuration options for the Wi-Fi station
+    menu "Wi-Fi Config"
+        config WIFI_SSID
+            string "Wi-Fi SSID"
+            default "myssid"
+            help
+                SSID (network name) for the controller to connect to
+
+        config WIFI_PASS
+            string "Wi-Fi Password"
+            default "mypassword"
+            help
+                Wi-Fi password for the network
+
+        config WIFI_MAX_RECONNECT_ATTEMPTS
+            int "Max reconnection attempts"
+            default 5
+            help
+                Set the maximum number of times the device will try to connect to the wifi before it gives up
+    endmenu
+
+endmenu
