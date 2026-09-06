@@ -21,4 +21,25 @@ menu "Main Configuration"
                 Set the maximum number of times the device will try to connect to the wifi before it gives up
     endmenu
 
+    # Configuration for MQTT
+    menu "MQTT Config"
+        config MQTT_BROKER_URL
+            string "Broker URL"
+            default "mqtt://core-mosquitto.local:1883"
+            help
+                URL of the MQTT broker. Port number should be specified with it.
+
+        config MQTT_CLIENT_USER
+            string "Client Username"
+            default "mqttuser"
+            help
+                Username of the MQTT client
+
+        config MQTT_CLIENT_PASS
+            string "Client Password"
+            default "mqttpass"
+            help
+                Password of the MQTT client
+    endmenu
+
 endmenu
