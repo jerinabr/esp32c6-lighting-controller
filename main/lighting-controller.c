@@ -24,18 +24,36 @@
 #define MQTT_CLIENT_PASS            CONFIG_MQTT_CLIENT_PASS
 
 /*
-    Event group status bits
+    Event Group Status Bits
 */
-#define WIFI_CONNECT_FAILED_BIT     BIT1
 #define WIFI_CONNECT_SUCCESS_BIT    BIT0
+#define WIFI_CONNECT_FAILED_BIT     BIT1
 
-#define MQTT_CONNECTED  BIT0
+#define MQTT_CLIENT_CONNECTED       BIT0
+
+/*
+    MQTT Message Queue Properties
+*/
+#define MQTT_MSG_QUEUE_DEPTH    8
+#define MQTT_MSG_MAX_TOPIC_LEN  64
+#define MQTT_MSG_MAX_DATA_LEN   256
+
+/*
+    MQTT Message Struct
+*/
+struct mqtt_msg_t {
+    char topic[MQTT_MSG_MAX_TOPIC_LEN];
+    int topic_len;
+    char data[MQTT_MSG_MAX_DATA_LEN];
+    int data_len;
+};
 
 /*
     Variables
 */
 static EventGroupHandle_t wifi_event_group;
 static EventGroupHandle_t mqtt_event_group;
+static QueueHandle_t mqtt_msg_queue;
 
 static uint8_t wifi_reconnect_attempt_count = 0;
 
@@ -216,7 +234,7 @@ static void mqtt_event_handler(
         case MQTT_EVENT_CONNECTED: {
             xEventGroupSetBits(
                 mqtt_event_group,
-                MQTT_CONNECTED
+                MQTT_CLIENT_CONNECTED
             );
             break;
         }
@@ -243,18 +261,36 @@ static void mqtt_event_handler(
 
         case MQTT_EVENT_DATA: {
             ESP_LOGI(DEBUG_TAG, "MQTT client received data");
-            ESP_LOGI(
-                DEBUG_TAG,
-                "TOPIC: %.*s",
-                event->topic_len,
-                event->topic
-            );
-            ESP_LOGI(
-                DEBUG_TAG,
-                "DATA: %.*s",
-                event->data_len,
-                event->data
-            );
+            struct mqtt_msg_t mqtt_msg;
+
+            /*
+                Don't put the message in the queue if it's too long. Also the
+                message should be 1 shorter than the max len because the string
+                gets manually null-terminated at the end after the memory copy.
+            */
+            if (
+                event->topic_len < MQTT_MSG_MAX_TOPIC_LEN &&
+                event->data_len < MQTT_MSG_MAX_DATA_LEN
+            ) {
+                mqtt_msg.topic_len = event->topic_len;
+                mqtt_msg.data_len = event->data_len;
+            } else {
+                break;
+            }
+            
+            /* Copy the contents of the message topic and payload */
+            memcpy(mqtt_msg.topic, event->topic, event->topic_len);
+            memcpy(mqtt_msg.data, event->data, event->data_len);
+
+            /* Null-terminate the string buffers */
+            mqtt_msg.topic[event->topic_len] = '\0';
+            mqtt_msg.data[event->data_len] = '\0';
+            
+            /* Put the MQTT message struct into the queue */
+            BaseType_t stat = xQueueSend(mqtt_msg_queue, (void*) &mqtt_msg, 0);
+            if (stat == errQUEUE_FULL) {
+                ESP_LOGI(DEBUG_TAG, "MQTT message queue full!");
+            }
             break;
         }
 
@@ -268,11 +304,7 @@ static void mqtt_event_handler(
         }
 
         default: {
-            ESP_LOGI(
-                DEBUG_TAG,
-                "MQTT event: %d",
-                event->event_id
-            );
+            ESP_LOGI(DEBUG_TAG, "MQTT event: %d", event->event_id);
             break;
         }
     }
@@ -284,8 +316,11 @@ static void mqtt_event_handler(
     @param client Pointer to the MQTT client
 */
 static void mqtt5_client_init(esp_mqtt_client_handle_t *client) {
-    /* Create the MQTT event group */
     mqtt_event_group = xEventGroupCreate();
+    mqtt_msg_queue = xQueueCreate(
+        MQTT_MSG_QUEUE_DEPTH,
+        sizeof(struct mqtt_msg_t)
+    );
 
     /* Initialize MQTT client */
     esp_mqtt_client_config_t mqtt5_cfg = {
@@ -336,12 +371,44 @@ static void mqtt5_client_init(esp_mqtt_client_handle_t *client) {
     /* Block until the MQTT client has connected */
     xEventGroupWaitBits(
         mqtt_event_group,
-        MQTT_CONNECTED,
+        MQTT_CLIENT_CONNECTED,
         pdFALSE,
         pdTRUE,
         portMAX_DELAY
     );
     ESP_LOGI(DEBUG_TAG, "MQTT client connected!");
+}
+
+static void process_mqtt_msg(struct mqtt_msg_t *mqtt_msg) {
+    ESP_LOGI(
+        DEBUG_TAG,
+        "TOPIC: %.*s",
+        mqtt_msg->topic_len,
+        mqtt_msg->topic
+    );
+    ESP_LOGI(
+        DEBUG_TAG,
+        "DATA: %.*s",
+        mqtt_msg->data_len,
+        mqtt_msg->data
+    );
+}
+
+/*!
+    @brief Task that blocks until an MQTT message is available
+*/
+static void mqtt_msg_handler_task(void *arg) {
+    while (1) {
+        struct mqtt_msg_t mqtt_msg;
+        BaseType_t stat = xQueueReceive(
+            mqtt_msg_queue,
+            (void*) &mqtt_msg,
+            portMAX_DELAY
+        );
+        if (stat == pdTRUE) {
+            process_mqtt_msg(&mqtt_msg);
+        }
+    }
 }
 
 void app_main(void) {
@@ -384,19 +451,15 @@ void app_main(void) {
         .retain_handle = 0,
     };
     esp_mqtt5_client_set_subscribe_property(client, &sub_property);
-    esp_mqtt_client_subscribe(client, "topic/qos0", 0);
+    esp_mqtt_client_subscribe(client, "kitchen/under-cabinet-light/cmd", 0);
 
-    /* Publish a message every 10 seconds */
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
-        esp_mqtt_client_publish(
-            client,
-            "topic/qos1",
-            "Hello from ESP32C6",
-            0,
-            0,
-            0
-        );
-        ESP_LOGI(DEBUG_TAG, "MQTT client published a message");
-    }
+    /* Create tasks */
+    xTaskCreate(
+        mqtt_msg_handler_task,
+        "mqtt_message_handler_task",
+        4096,
+        NULL,
+        0,
+        NULL
+    );
 }
