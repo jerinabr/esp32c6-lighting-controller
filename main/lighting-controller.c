@@ -6,6 +6,7 @@
 #include "esp_event.h"
 #include "nvs_flash.h"
 #include "mqtt_client.h"
+#include "cJSON.h"
 
 /*
     Message tag used for ESP_LOGI messages
@@ -263,28 +264,22 @@ static void mqtt_event_handler(
             ESP_LOGI(DEBUG_TAG, "MQTT client received data");
             struct mqtt_msg_t mqtt_msg;
 
-            /*
-                Don't put the message in the queue if it's too long. Also the
-                message should be 1 shorter than the max len because the string
-                gets manually null-terminated at the end after the memory copy.
-            */
+            /* Don't put the message in the queue if it's too long */
             if (
-                event->topic_len < MQTT_MSG_MAX_TOPIC_LEN &&
-                event->data_len < MQTT_MSG_MAX_DATA_LEN
+                event->topic_len > MQTT_MSG_MAX_TOPIC_LEN ||
+                event->data_len > MQTT_MSG_MAX_DATA_LEN
             ) {
+                break;
+            } else {
                 mqtt_msg.topic_len = event->topic_len;
                 mqtt_msg.data_len = event->data_len;
-            } else {
-                break;
             }
             
-            /* Copy the contents of the message topic and payload */
+            /* Copy the contents of the message topic and payload. The message
+                doesn't need to be null-terminated because the length of the
+                message is used instead. */
             memcpy(mqtt_msg.topic, event->topic, event->topic_len);
             memcpy(mqtt_msg.data, event->data, event->data_len);
-
-            /* Null-terminate the string buffers */
-            mqtt_msg.topic[event->topic_len] = '\0';
-            mqtt_msg.data[event->data_len] = '\0';
             
             /* Put the MQTT message struct into the queue */
             BaseType_t stat = xQueueSend(mqtt_msg_queue, (void*) &mqtt_msg, 0);
@@ -379,19 +374,52 @@ static void mqtt5_client_init(esp_mqtt_client_handle_t *client) {
     ESP_LOGI(DEBUG_TAG, "MQTT client connected!");
 }
 
-static void process_mqtt_msg(struct mqtt_msg_t *mqtt_msg) {
-    ESP_LOGI(
-        DEBUG_TAG,
-        "TOPIC: %.*s",
-        mqtt_msg->topic_len,
-        mqtt_msg->topic
+/*!
+    @brief Parse MQTT message and 
+*/
+static void process_mqtt_msg(const struct mqtt_msg_t *msg) {
+    const char *err;
+    cJSON *msg_json = cJSON_ParseWithLengthOpts(
+        msg->data,
+        msg->data_len,
+        &err,
+        0
     );
-    ESP_LOGI(
-        DEBUG_TAG,
-        "DATA: %.*s",
-        mqtt_msg->data_len,
-        mqtt_msg->data
+
+    /* If the JSON message couldn't be parsed, delete the JSON object and print
+        the error */
+    if (msg_json == NULL) {
+        if (err != NULL) {
+            ESP_LOGI(DEBUG_TAG, "JSON parsing error at: %s", err);
+        }
+        cJSON_Delete(msg_json);
+        return;
+    }
+
+    /* Extract JSON values */
+    const cJSON *pwr = cJSON_GetObjectItemCaseSensitive(
+        msg_json,
+        "power"
     );
+    if (cJSON_IsString(pwr) && (pwr->valuestring != NULL)) {
+        ESP_LOGI(DEBUG_TAG, "Power %s", pwr->valuestring);
+    }
+
+    const cJSON *brightness = cJSON_GetObjectItemCaseSensitive(
+        msg_json,
+        "brightness"
+    );
+    if (cJSON_IsNumber(brightness)) {
+        ESP_LOGI(DEBUG_TAG, "Brightness: %d", brightness->valueint);
+    }
+
+    const cJSON *color_temp = cJSON_GetObjectItemCaseSensitive(
+        msg_json,
+        "temp"
+    );
+    if (cJSON_IsNumber(color_temp)) {
+        ESP_LOGI(DEBUG_TAG, "Color Temperature: %dK", color_temp->valueint);
+    }
 }
 
 /*!
@@ -399,14 +427,14 @@ static void process_mqtt_msg(struct mqtt_msg_t *mqtt_msg) {
 */
 static void mqtt_msg_handler_task(void *arg) {
     while (1) {
-        struct mqtt_msg_t mqtt_msg;
+        struct mqtt_msg_t msg;
         BaseType_t stat = xQueueReceive(
             mqtt_msg_queue,
-            (void*) &mqtt_msg,
+            (void*) &msg,
             portMAX_DELAY
         );
         if (stat == pdTRUE) {
-            process_mqtt_msg(&mqtt_msg);
+            process_mqtt_msg(&msg);
         }
     }
 }
