@@ -7,6 +7,7 @@
 #include "nvs_flash.h"
 #include "mqtt_client.h"
 #include "cJSON.h"
+#include "led_strip.h"
 
 /*
     Message tag used for ESP_LOGI messages
@@ -23,6 +24,9 @@
 #define MQTT_BROKER_URL             CONFIG_MQTT_BROKER_URL
 #define MQTT_CLIENT_USER            CONFIG_MQTT_CLIENT_USER
 #define MQTT_CLIENT_PASS            CONFIG_MQTT_CLIENT_PASS
+
+#define LED_STRIP_GPIO_PIN          0
+#define LED_STRIP_LED_COUNT         10
 
 /*
     Event Group Status Bits
@@ -57,6 +61,11 @@ static EventGroupHandle_t mqtt_event_group;
 static QueueHandle_t mqtt_msg_queue;
 
 static uint8_t wifi_reconnect_attempt_count = 0;
+
+static led_strip_handle_t led_strip;
+static int color_temp;
+static int brightness;
+static int pwr;
 
 /*!
     @brief Callback for default events
@@ -396,29 +405,32 @@ static void process_mqtt_msg(const struct mqtt_msg_t *msg) {
         return;
     }
 
-    /* Extract JSON values */
-    const cJSON *pwr = cJSON_GetObjectItemCaseSensitive(
+    /* Extract JSON values and populate the led state struct with them */
+    const cJSON *pwr_json = cJSON_GetObjectItemCaseSensitive(
         msg_json,
         "power"
     );
-    if (cJSON_IsString(pwr) && (pwr->valuestring != NULL)) {
-        ESP_LOGI(DEBUG_TAG, "Power %s", pwr->valuestring);
+    if (cJSON_IsNumber(pwr_json)) {
+        ESP_LOGI(DEBUG_TAG, "Power: %d", pwr_json->valueint);
+        pwr = pwr_json->valueint;
     }
 
-    const cJSON *brightness = cJSON_GetObjectItemCaseSensitive(
+    const cJSON *brightness_json = cJSON_GetObjectItemCaseSensitive(
         msg_json,
         "brightness"
     );
-    if (cJSON_IsNumber(brightness)) {
-        ESP_LOGI(DEBUG_TAG, "Brightness: %d", brightness->valueint);
+    if (cJSON_IsNumber(brightness_json)) {
+        ESP_LOGI(DEBUG_TAG, "Brightness: %d", brightness_json->valueint);
+        brightness = brightness_json->valueint;
     }
 
-    const cJSON *color_temp = cJSON_GetObjectItemCaseSensitive(
+    const cJSON *color_temp_json = cJSON_GetObjectItemCaseSensitive(
         msg_json,
         "temp"
     );
-    if (cJSON_IsNumber(color_temp)) {
-        ESP_LOGI(DEBUG_TAG, "Color Temperature: %dK", color_temp->valueint);
+    if (cJSON_IsNumber(color_temp_json)) {
+        ESP_LOGI(DEBUG_TAG, "Color Temperature: %dK", color_temp_json->valueint);
+        color_temp = color_temp_json->valueint;
     }
 }
 
@@ -439,7 +451,45 @@ static void mqtt_msg_handler_task(void *arg) {
     }
 }
 
+/*!
+    @brief Initialize the LED strip
+*/
+static void led_strip_init() {
+    /* Create LED strip configuration */
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = LED_STRIP_GPIO_PIN,
+        .max_leds = LED_STRIP_LED_COUNT,
+        .led_model = LED_MODEL_WS2812,
+        /* The color component format doesn't really matter much since we only
+            have 2 "colors" (cool white and warm white) */
+        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+        .flags = {
+            .invert_out = 0,
+        }
+    };
+
+    /* Create LED strip driver configuration */
+    led_strip_rmt_config_t rmt_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10e6,
+        .mem_block_symbols = 0,
+        .flags = {
+            .with_dma = 0
+        }
+    };
+
+    /* Create the LED strip object */
+    led_strip_new_rmt_device(
+        &strip_config,
+        &rmt_config,
+        &led_strip
+    );
+}
+
 void app_main(void) {
+    /* Initialize the LED strip */
+    led_strip_init();
+
     /* WIFI driver configuration is stored in NVS so it needs to be initialized
         before WIFI is initialized. If the NVS partition has no empty pages or
         the data is in a bad format, the flash needs to be erased before being
