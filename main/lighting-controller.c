@@ -8,6 +8,7 @@
 #include "mqtt_client.h"
 #include "cJSON.h"
 #include "led_strip.h"
+#include "driver/gpio.h"
 
 /*
     Message tag used for ESP_LOGI messages
@@ -28,6 +29,8 @@
 #define LED_STRIP_GPIO_PIN          0
 #define LED_STRIP_LED_COUNT         10
 
+#define STATUS_LED_N_GPIO_PIN       15
+
 /*
     Event Group Status Bits
 */
@@ -42,6 +45,12 @@
 #define MQTT_MSG_QUEUE_DEPTH    8
 #define MQTT_MSG_MAX_TOPIC_LEN  64
 #define MQTT_MSG_MAX_DATA_LEN   256
+
+/*
+    Status LED Levels
+*/
+#define STATUS_LED_ON   0
+#define STATUS_LED_OFF  1
 
 /*
     MQTT Message Struct
@@ -63,9 +72,11 @@ static QueueHandle_t mqtt_msg_queue;
 static uint8_t wifi_reconnect_attempt_count = 0;
 
 static led_strip_handle_t led_strip;
-static int color_temp;
-static int brightness;
-static int pwr;
+static int color_temp = 4000;
+static int brightness = 63;
+static int pwr = 0;
+
+static uint8_t sys_ready = 0;
 
 /*!
     @brief Callback for default events
@@ -437,7 +448,7 @@ static void process_mqtt_msg(const struct mqtt_msg_t *msg) {
 /*!
     @brief Task that blocks until an MQTT message is available
 */
-static void mqtt_msg_handler_task(void *arg) {
+static void mqtt_msg_handler_task(void *args) {
     while (1) {
         struct mqtt_msg_t msg;
         BaseType_t stat = xQueueReceive(
@@ -486,7 +497,69 @@ static void led_strip_init() {
     );
 }
 
+/*!
+    @brief Task that controls the LED strip based on desired settings
+*/
+static void led_strip_controller_task(void *args) {
+    while (1) {
+        uint8_t warm_white = 0;
+        uint8_t cool_white = 0;
+        if (pwr) {
+            float m_cool = (float) brightness / 3000.0;
+            float m_warm = -m_cool;
+            float b_cool = -m_cool * 3000.0;
+            float b_warm = (float) brightness - m_warm * 3000.0;
+            warm_white = (uint8_t) (m_warm * (float) color_temp + b_warm);
+            cool_white = (uint8_t) (m_cool * (float) color_temp + b_cool);
+        }
+        for (int i = 0; i < LED_STRIP_LED_COUNT; i++) {
+            led_strip_set_pixel(
+                led_strip,
+                i,
+                warm_white,
+                cool_white,
+                0
+            );
+        }
+        led_strip_refresh(led_strip);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+/*!
+    @brief Task that blinks the status LED during system initialization and
+    holds it steady once initialized
+*/
+static void status_led_task(void *args) {
+    /* Configure status LED GPIO */
+    gpio_reset_pin(STATUS_LED_N_GPIO_PIN);
+    gpio_set_direction(STATUS_LED_N_GPIO_PIN, GPIO_MODE_OUTPUT);
+
+    /* Blink the LED while the system isnt ready */
+    int led_state = STATUS_LED_OFF;
+    while (!sys_ready) {
+        gpio_set_level(STATUS_LED_N_GPIO_PIN, led_state);
+        led_state = !led_state;
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+
+    /* Keep the status LED on once initialized and delete the task since this
+        task is complete */
+    gpio_set_level(STATUS_LED_N_GPIO_PIN, STATUS_LED_ON);
+    vTaskDelete(NULL);
+}
+
 void app_main(void) {
+    /* Create status LED task to blink during setup */
+    xTaskCreate(
+        status_led_task,
+        "status_led_task",
+        1024,
+        NULL,
+        0,
+        NULL
+    );
+
     /* Initialize the LED strip */
     led_strip_init();
 
@@ -531,6 +604,9 @@ void app_main(void) {
     esp_mqtt5_client_set_subscribe_property(client, &sub_property);
     esp_mqtt_client_subscribe(client, "kitchen/under-cabinet-light/cmd", 0);
 
+    /* Indicate system ready to make the status LED stop blinking */
+    sys_ready = 1;
+
     /* Create tasks */
     xTaskCreate(
         mqtt_msg_handler_task,
@@ -538,6 +614,14 @@ void app_main(void) {
         4096,
         NULL,
         0,
+        NULL
+    );
+    xTaskCreate(
+        led_strip_controller_task,
+        "led_strip_controller_task",
+        4096,
+        NULL,
+        1,
         NULL
     );
 }
