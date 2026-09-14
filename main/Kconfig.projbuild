@@ -42,4 +42,19 @@ menu "Main Configuration"
                 Password of the MQTT client
     endmenu
 
+    # Configuration for the LED strip
+    menu "LED Strip Config"
+        config LED_STRIP_GPIO_PIN
+            int "GPIO pin"
+            default 0
+            help
+                GPIO pin the LED strip is connected to
+
+        config LED_STRIP_LED_COUNT
+            int "Number of LEDs"
+            default 1
+            help
+                Number of LEDs in the strip
+    endmenu
+
 endmenu

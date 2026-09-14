@@ -26,10 +26,21 @@
 #define MQTT_CLIENT_USER            CONFIG_MQTT_CLIENT_USER
 #define MQTT_CLIENT_PASS            CONFIG_MQTT_CLIENT_PASS
 
-#define LED_STRIP_GPIO_PIN          0
-#define LED_STRIP_LED_COUNT         10
+#define LED_STRIP_GPIO_PIN          CONFIG_LED_STRIP_GPIO_PIN
+#define LED_STRIP_LED_COUNT         CONFIG_LED_STRIP_LED_COUNT
 
-#define STATUS_LED_N_GPIO_PIN       15
+/*
+    GPIO Pins
+*/
+#define STATUS_LED_N        15
+#define RF_SWITCH_EN_N      3
+#define RF_SWITCH_PORT_SEL  14
+
+/*
+    GPIO States
+*/
+#define EXT_ANTENNA_SEL     1
+#define CHIP_ANTENNA_SEL    0
 
 /*
     Event Group Status Bits
@@ -45,12 +56,6 @@
 #define MQTT_MSG_QUEUE_DEPTH    8
 #define MQTT_MSG_MAX_TOPIC_LEN  64
 #define MQTT_MSG_MAX_DATA_LEN   256
-
-/*
-    Status LED Levels
-*/
-#define STATUS_LED_ON   0
-#define STATUS_LED_OFF  1
 
 /*
     MQTT Message Struct
@@ -71,6 +76,7 @@ static QueueHandle_t mqtt_msg_queue;
 
 static uint8_t wifi_reconnect_attempt_count = 0;
 
+static TaskHandle_t led_strip_ctrl_task_hdl;
 static led_strip_handle_t led_strip;
 static int color_temp = 4000;
 static int brightness = 63;
@@ -225,8 +231,12 @@ void wifi_sta_init() {
     /* Verify which event actually happened */
     if (wifi_event_group_bits & WIFI_CONNECT_SUCCESS_BIT) {
         ESP_LOGI(DEBUG_TAG, "Connected to Wi-Fi!");
+        
+        wifi_ap_record_t ap_info;
+        esp_wifi_sta_get_ap_info(&ap_info);
+        ESP_LOGI(DEBUG_TAG, "RSSI: %d dBm", ap_info.rssi);
     } else if (wifi_event_group_bits & WIFI_CONNECT_FAILED_BIT) {
-        ESP_LOGI(DEBUG_TAG, "Couldn't connect to Wi-Fi!!!!!");
+        ESP_LOGE(DEBUG_TAG, "Couldn't connect to Wi-Fi!!!!!");
     } else {
         ESP_LOGE(DEBUG_TAG, "Bruh what happened");
     }
@@ -443,6 +453,15 @@ static void process_mqtt_msg(const struct mqtt_msg_t *msg) {
         ESP_LOGI(DEBUG_TAG, "Color Temperature: %dK", color_temp_json->valueint);
         color_temp = color_temp_json->valueint;
     }
+
+    /* Notify the LED strip controller that a new LED state is available */
+    xTaskGenericNotify(
+        led_strip_ctrl_task_hdl,
+        0,
+        0,
+        0,
+        0
+    );
 }
 
 /*!
@@ -497,32 +516,104 @@ static void led_strip_init() {
     );
 }
 
+static void get_white_colors_from_led_state(
+    int pwr,
+    int brightness,
+    int color_temp,
+    uint8_t *warm_white,
+    uint8_t *cool_white
+) {
+    if (pwr) {
+        float m_cool = (float) brightness / 3000.0;
+        float m_warm = -m_cool;
+        float b_cool = -m_cool * 3000.0;
+        float b_warm = (float) brightness - m_warm * 3000.0;
+        *warm_white = (uint8_t) (m_warm * (float) color_temp + b_warm);
+        *cool_white = (uint8_t) (m_cool * (float) color_temp + b_cool);
+    } else {
+        *warm_white = 0;
+        *cool_white = 0;
+    }
+}
+
+static void set_led_strip(uint8_t warm_white, uint8_t cool_white) {
+    for (int i = 0; i < LED_STRIP_LED_COUNT; i++) {
+        led_strip_set_pixel(
+            led_strip,
+            i,
+            warm_white,
+            cool_white,
+            0
+        );
+    }
+    led_strip_refresh(led_strip);
+}
+
 /*!
-    @brief Task that controls the LED strip based on desired settings
+    @brief Update the LED strip and handle interpolations
+*/
+static void led_strip_update(
+    int prev_pwr,
+    int prev_brightness,
+    int prev_color_temp
+) {
+    /* Calculate previous white colors */
+    uint8_t prev_warm_white;
+    uint8_t prev_cool_white;
+    get_white_colors_from_led_state(
+        prev_pwr,
+        prev_brightness,
+        prev_color_temp,
+        &prev_warm_white,
+        &prev_cool_white
+    );
+
+    /* Calculate new white colors */
+    uint8_t new_warm_white;
+    uint8_t new_cool_white;
+    get_white_colors_from_led_state(
+        pwr,
+        brightness,
+        color_temp,
+        &new_warm_white,
+        &new_cool_white
+    );
+
+    int alpha_inc = (abs(new_warm_white - prev_warm_white) + abs(new_cool_white - prev_cool_white)) / 100;
+    alpha_inc = (alpha_inc == 0 ? 1 : alpha_inc);
+    
+    for (int a = 0; a < 100; a += alpha_inc) {
+        float a_f = (float) a / 100.0;
+        uint8_t warm_white = (uint8_t) ((float) prev_warm_white + a_f * ((float) new_warm_white - (float) prev_warm_white));
+        uint8_t cool_white = (uint8_t) ((float) prev_cool_white + a_f * ((float) new_cool_white - (float) prev_cool_white));
+        set_led_strip(warm_white, cool_white);
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    set_led_strip(new_warm_white, new_cool_white);
+}
+
+/*!
+    @brief Task that updates the LED strip when there's a new desired state
 */
 static void led_strip_controller_task(void *args) {
+    int prev_pwr = pwr;
+    int prev_brightness = brightness;
+    int prev_color_temp = color_temp;
     while (1) {
-        uint8_t warm_white = 0;
-        uint8_t cool_white = 0;
-        if (pwr) {
-            float m_cool = (float) brightness / 3000.0;
-            float m_warm = -m_cool;
-            float b_cool = -m_cool * 3000.0;
-            float b_warm = (float) brightness - m_warm * 3000.0;
-            warm_white = (uint8_t) (m_warm * (float) color_temp + b_warm);
-            cool_white = (uint8_t) (m_cool * (float) color_temp + b_cool);
+        BaseType_t rcv = xTaskGenericNotifyWait(
+            0,
+            0,
+            0,
+            NULL,
+            portMAX_DELAY
+        );
+        if (rcv == pdPASS) {
+            led_strip_update(prev_pwr, prev_brightness, prev_color_temp);
+            prev_pwr = pwr;
+            prev_brightness = brightness;
+            prev_color_temp = color_temp;
         }
-        for (int i = 0; i < LED_STRIP_LED_COUNT; i++) {
-            led_strip_set_pixel(
-                led_strip,
-                i,
-                warm_white,
-                cool_white,
-                0
-            );
-        }
-        led_strip_refresh(led_strip);
-        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -532,20 +623,20 @@ static void led_strip_controller_task(void *args) {
 */
 static void status_led_task(void *args) {
     /* Configure status LED GPIO */
-    gpio_reset_pin(STATUS_LED_N_GPIO_PIN);
-    gpio_set_direction(STATUS_LED_N_GPIO_PIN, GPIO_MODE_OUTPUT);
+    gpio_reset_pin(STATUS_LED_N);
+    gpio_set_direction(STATUS_LED_N, GPIO_MODE_OUTPUT);
 
     /* Blink the LED while the system isnt ready */
-    int led_state = STATUS_LED_OFF;
+    int led_state = 1;
     while (!sys_ready) {
-        gpio_set_level(STATUS_LED_N_GPIO_PIN, led_state);
+        gpio_set_level(STATUS_LED_N, led_state);
         led_state = !led_state;
         vTaskDelay(pdMS_TO_TICKS(250));
     }
 
     /* Keep the status LED on once initialized and delete the task since this
         task is complete */
-    gpio_set_level(STATUS_LED_N_GPIO_PIN, STATUS_LED_ON);
+    gpio_set_level(STATUS_LED_N, 0);
     vTaskDelete(NULL);
 }
 
@@ -575,6 +666,17 @@ void app_main(void) {
         nvs_flash_erase();
         nvs_flash_init();
     }
+
+    /* Enable the RF switch and select the chip antenna as the RF path. If this
+        isn't done, the WIFI will still work because of RF leakage, but it will
+        work very poorly. */
+    gpio_reset_pin(RF_SWITCH_EN_N);
+    gpio_set_direction(RF_SWITCH_EN_N, GPIO_MODE_OUTPUT);
+    gpio_set_level(RF_SWITCH_EN_N, 0);
+
+    gpio_reset_pin(RF_SWITCH_PORT_SEL);
+    gpio_set_direction(RF_SWITCH_PORT_SEL, GPIO_MODE_OUTPUT);
+    gpio_set_level(RF_SWITCH_PORT_SEL, CHIP_ANTENNA_SEL);
 
     /* Connect to the WIFI */
     wifi_sta_init();
@@ -622,6 +724,6 @@ void app_main(void) {
         4096,
         NULL,
         1,
-        NULL
+        &led_strip_ctrl_task_hdl
     );
 }
