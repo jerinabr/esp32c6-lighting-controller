@@ -55,6 +55,24 @@ menu "Main Configuration"
             default 1
             help
                 Number of LEDs in the strip
+
+        config LED_STRIP_MAX_BRIGHTNESS
+            int "Max brightness"
+            default 255
+            help
+                Maximum brightness value that the LED strip can be set to
+
+        config LED_STRIP_MAX_KELVIN
+            int "Max Kelvin"
+            default 6000
+            help
+                Maximum Kelvin rating of the LED strip
+        
+        config LED_STRIP_MIN_KELVIN
+            int "Min Kelvin"
+            default 3000
+            help
+                Minimum Kelvin rating of the LED strip
     endmenu
 
 endmenu
