@@ -5,6 +5,7 @@ sdkconfig.old
 
 ## Misc
 dependencies.lock
+.clangd
 
 # Folders
 .cache/
