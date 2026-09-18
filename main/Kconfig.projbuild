@@ -14,11 +14,28 @@ menu "Main Configuration"
             help
                 Wi-Fi password for the network
 
-        config WIFI_MAX_RECONNECT_ATTEMPTS
-            int "Max reconnection attempts"
+        config WIFI_MAX_CONNECTION_ATTEMPTS
+            int "Max initial connection attempts"
             default 5
             help
-                Set the maximum number of times the device will try to connect to the wifi before it gives up
+                Maximum number of times the device will try to connect to the
+                wifi when it's powered up. If set to 0, the device will try to
+                connect to the wifi forever.
+
+        config WIFI_MAX_RECONNECT_ATTEMPTS
+            int "Max reconnection attempts"
+            default 0
+            help
+                Maximum number of times the device will try to reconnect to the
+                wifi after it loses connection. If set to 0, the device will try
+                to reconnect to the wifi forever.
+        
+        config WIFI_CONNECT_RETRY_DELAY_MS
+            int "Connection retry delay (ms)"
+            default 5000
+            help
+                Time delay in milliseconds the device waits before trying to
+                connect to the Wi-Fi network again
     endmenu
 
     # Configuration for MQTT

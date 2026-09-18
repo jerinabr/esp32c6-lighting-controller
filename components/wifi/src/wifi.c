@@ -14,11 +14,12 @@
 /*
     Event group status bits
 */
-#define WIFI_CONNECT_SUCCESS_BIT    BIT0
-#define WIFI_CONNECT_FAILED_BIT     BIT1
+#define WIFI_CONNECTED_BIT      BIT0
+#define WIFI_DISCONNECTED_BIT   BIT1
+#define IP_ACQUIRED_BIT         BIT2
 
-static EventGroupHandle_t wifi_event_group;
-static uint8_t reconnect_attempt_count = 0;
+static EventGroupHandle_t network_event_group;
+static uint32_t connect_attempt_count = 0;
 
 /*******************************************************************************
 -- PRIVATE FUNCTIONS --
@@ -40,33 +41,22 @@ static void wifi_event_handler(
     void *event_data
 ) {
     switch (event_id) {
-        /* When the station starts, try to connect to the WIFI with the provided
-            credentials. */
-        case WIFI_EVENT_STA_START: {
-            esp_wifi_connect();
+        case WIFI_EVENT_STA_CONNECTED: {
+            xEventGroupSetBits(
+                network_event_group,
+                WIFI_CONNECTED_BIT
+            );
             break;
         }
-        /* When the station disconnects from the network, try to reconnect until
-            the maximum number of retries has been reached. Once that happens,
-            indicate in the event group that the connection failed. */
+        
         case WIFI_EVENT_STA_DISCONNECTED: {
-            if (reconnect_attempt_count < CONFIG_WIFI_MAX_RECONNECT_ATTEMPTS) {
-                esp_wifi_connect();
-                reconnect_attempt_count++;
-                ESP_LOGI(
-                    DEBUG_TAG,
-                    "Lost Wi-Fi connection. Reconnecting..."
-                );
-            } else {
-                xEventGroupSetBits(
-                    wifi_event_group,
-                    WIFI_CONNECT_FAILED_BIT
-                );
-            }
+            xEventGroupSetBits(
+                network_event_group,
+                WIFI_DISCONNECTED_BIT
+            );
             break;
         }
-        /* Log any other event. I'll need to compare the event_id printed to the
-            enum list so that's a drag. */
+        
         default: {
             ESP_LOGI(DEBUG_TAG, "Wi-Fi event: %d", event_id);
             break;
@@ -90,25 +80,14 @@ static void ip_event_handler(
     void *event_data
 ) {
     switch (event_id) {
-        /* When an IP address has been acquired, indicate in the event group
-            that the connection was a success */
         case IP_EVENT_STA_GOT_IP: {
-            ip_event_got_ip_t *event = (ip_event_got_ip_t*) event_data;
-            ESP_LOGI(
-                DEBUG_TAG,
-                "Connected to Wi-Fi with IP address: " IPSTR,
-                IP2STR(&event->ip_info.ip)
-            );
             xEventGroupSetBits(
-                wifi_event_group,
-                WIFI_CONNECT_SUCCESS_BIT
+                network_event_group,
+                IP_ACQUIRED_BIT
             );
-            /* Reset the retry count once connected to WIFI */
-            reconnect_attempt_count = 0;
             break;
         }
-        /* Log any other event. I'll need to compare the event_id printed to the
-            enum list so that's a drag. */
+        
         default: {
             ESP_LOGI(DEBUG_TAG, "IP event: %d", event_id);
             break;
@@ -117,15 +96,25 @@ static void ip_event_handler(
 }
 
 /*!
-    @brief Initialize the WIFI station and connect to the network
+    @brief Initialize the WIFI station
 */
-static void wifi_sta_init() {
+static esp_err_t wifi_sta_init(
+    wifi_config_t *wifi_config
+) {
+    esp_err_t err;
+
     /* Initialize the TCP/IP stack */
-    esp_netif_init();
+    err = esp_netif_init();
+    if (err != ESP_OK) {
+        return err;
+    }
 
     /* Create the default event loop. This event loop is used to monitor the
         WIFI and IP events. */
-    esp_event_loop_create_default();
+    err = esp_event_loop_create_default();
+    if (err != ESP_OK) {
+        return err;
+    }
 
     /* Create a ESP-NETIF object with default configuration for WIFI station.
         This has to be called AFTER the default event loop is created. */
@@ -133,78 +122,76 @@ static void wifi_sta_init() {
     
     /* Initialize the WIFI driver with default configuration */
     wifi_init_config_t wifi_driver_config = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&wifi_driver_config);
+    err = esp_wifi_init(&wifi_driver_config);
+    if (err != ESP_OK) {
+        return err;
+    }
 
     /* Register the event handler as a callback to the specified WIFI and IP
         events */
     esp_event_handler_instance_t wifi_event_inst;
-    esp_event_handler_instance_t ip_event_inst;
-    esp_event_handler_instance_register(
+    err = esp_event_handler_instance_register(
         WIFI_EVENT,
         ESP_EVENT_ANY_ID,
         &wifi_event_handler,
         NULL,
         &wifi_event_inst
     );
-    esp_event_handler_instance_register(
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    esp_event_handler_instance_t ip_event_inst;
+    err = esp_event_handler_instance_register(
         IP_EVENT, 
         ESP_EVENT_ANY_ID, 
         &ip_event_handler,
         NULL,
         &ip_event_inst
     );
-
-    /* Create the WIFI station configuration */
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = CONFIG_WIFI_SSID,
-            .password = CONFIG_WIFI_PASS,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-            .disable_wpa3_compatible_mode = 0,
-        },
-    };
+    if (err != ESP_OK) {
+        return err;
+    }
 
     /* Start WIFI in station mode with the above configuration */
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-    esp_wifi_start();
-
-    /* Block until either the WIFI has successfully connected or the maximum
-        number of connection retries has been reached */
-    EventBits_t wifi_event_group_bits = xEventGroupWaitBits(
-        wifi_event_group,
-        WIFI_CONNECT_SUCCESS_BIT | WIFI_CONNECT_FAILED_BIT,
-        pdFALSE,
-        pdFALSE,
-        portMAX_DELAY
-    );
-
-    /* Verify which event actually happened */
-    if (wifi_event_group_bits & WIFI_CONNECT_SUCCESS_BIT) {
-        ESP_LOGI(DEBUG_TAG, "Connected to Wi-Fi!");
-        
-        wifi_ap_record_t ap_info;
-        esp_wifi_sta_get_ap_info(&ap_info);
-        ESP_LOGI(DEBUG_TAG, "RSSI: %d dBm", ap_info.rssi);
-    } else if (wifi_event_group_bits & WIFI_CONNECT_FAILED_BIT) {
-        ESP_LOGE(DEBUG_TAG, "Couldn't connect to Wi-Fi!!!!!");
-    } else {
-        ESP_LOGE(DEBUG_TAG, "Bruh what happened");
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        return err;
     }
+
+    err = esp_wifi_set_config(WIFI_IF_STA, wifi_config);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        return err;
+    }
+    
+    return ESP_OK;
 }
 
 /*******************************************************************************
 -- PUBLIC FUNCTIONS --
 *******************************************************************************/
 
-void wifi_init() {
-    wifi_event_group = xEventGroupCreate();
+/*!
+    @brief Initialize the WIFI system as a station
+    @param wifi_config Pointer to the wifi configuration struct
+    @return
+    - ESP_OK if the WIFI station was initialized
+    - error code if the WIFI station failed to initialize
+*/
+esp_err_t wifi_init(wifi_config_t *wifi_config) {
+    network_event_group = xEventGroupCreate();
+    esp_err_t err;
 
     /* WIFI driver configuration is stored in NVS so it needs to be initialized
         before WIFI is initialized. If the NVS partition has no empty pages or
         the data is in a bad format, the flash needs to be erased before being
         initialized again. */
-    esp_err_t err = nvs_flash_init();
+    err = nvs_flash_init();
     if (
         err == ESP_ERR_NVS_NO_FREE_PAGES ||
         err == ESP_ERR_NVS_NEW_VERSION_FOUND
@@ -212,7 +199,64 @@ void wifi_init() {
         nvs_flash_erase();
         nvs_flash_init();
     }
+    err = nvs_flash_init();
+    if (err != ESP_OK) {
+        return err;
+    }
 
     /* Connect to the WIFI */
-    wifi_sta_init();
+    err = wifi_sta_init(wifi_config);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    return ESP_OK;
+}
+
+/*!
+    @brief Connect to the WIFI network provided by the WIFI configuration
+    @param max_connect_attempts Maximum number of times the device will try to
+    connect to the network. Set this to 0 if the device should try to connect
+    indefinitely.
+    @param connect_retry_delay_ms Milliseconds to wait before trying to
+    reconnect to the network
+    @return
+    - ESP_OK if the device connected to the WIFI network
+    - error code if the device failed to connect to the WIFI network
+*/
+esp_err_t wifi_connect(
+    uint32_t max_connect_attempts,
+    uint32_t connect_retry_delay_ms
+) {
+    /* Try to connect to the provided WIFI network */
+    const uint8_t connect_forever = (max_connect_attempts == 0);
+    uint8_t wifi_connect_success = 0;
+    while (connect_forever || (connect_attempt_count < max_connect_attempts)) {
+        connect_attempt_count++;
+        ESP_LOGI(DEBUG_TAG, "Connecting to Wi-Fi...");
+        if (esp_wifi_connect() == ESP_OK) {
+            wifi_connect_success = 1;
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(connect_retry_delay_ms));
+    }
+
+    /* This will never be reached if the device is configured to try to connect
+        to the WIFI forever */
+    if (!wifi_connect_success) {
+        ESP_LOGE(DEBUG_TAG, "Failed to connect to Wi-Fi");
+        return ESP_FAIL;
+    }
+
+    /* Once the WIFI is connected, wait till an IP address has been acquired */
+    xEventGroupWaitBits(
+        network_event_group,
+        IP_ACQUIRED_BIT,
+        pdFALSE,
+        pdFALSE,
+        portMAX_DELAY
+    );
+
+    ESP_LOGI(DEBUG_TAG, "Wi-Fi connected!");
+    return ESP_OK;
 }

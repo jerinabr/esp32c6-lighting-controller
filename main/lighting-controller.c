@@ -615,6 +615,8 @@ static void status_led_task(void *args) {
 }
 
 void app_main(void) {
+    esp_err_t err;
+
     /* Create status LED task to blink during setup */
     xTaskCreate(
         status_led_task,
@@ -636,8 +638,30 @@ void app_main(void) {
     gpio_set_direction(RF_SWITCH_PORT_SEL, GPIO_MODE_OUTPUT);
     gpio_set_level(RF_SWITCH_PORT_SEL, CHIP_ANTENNA_SEL);
 
-    /* Connect to the WIFI */
-    wifi_init();
+    /* Create the WIFI station configuration */
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = CONFIG_WIFI_SSID,
+            .password = CONFIG_WIFI_PASS,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .disable_wpa3_compatible_mode = 0,
+        },
+    };
+    
+    /* Initialize the WIFI system */
+    err = wifi_init(&wifi_config);
+    if (err != ESP_OK) {
+        return;
+    }
+
+    /* Connect to the WIFI network */
+    err = wifi_connect(
+        CONFIG_WIFI_MAX_CONNECTION_ATTEMPTS,
+        CONFIG_WIFI_CONNECT_RETRY_DELAY_MS
+    );
+    if (err != ESP_OK) {
+        return;
+    }
 
     /* Create queues */
     mqtt_msg_queue = xQueueCreate(8, sizeof(struct mqtt_msg_s));
