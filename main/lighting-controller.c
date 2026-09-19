@@ -4,21 +4,15 @@
 #include "esp_log.h"
 #include "mqtt_client.h"
 #include "cJSON.h"
-#include "led_strip.h"
 #include "driver/gpio.h"
 #include "math.h"
-#include "wifi.h"
+#include "wifi_handler.h"
+#include "led_strip_handler.h"
 
 /*
     Message tag used for ESP_LOGI messages
 */
 #define DEBUG_TAG   "app"
-
-/*
-    LED strip initial conditions
-*/
-#define INITIAL_BRIGHTNESS  32
-#define INITIAL_COLOR_TEMP  0
 
 /*
     GPIO pins
@@ -36,7 +30,7 @@
 /*
     Event group status bits
 */
-#define MQTT_CLIENT_CONNECTED       BIT0
+#define MQTT_CLIENT_CONNECTED   BIT0
 
 /*
     MQTT message queue properties
@@ -55,22 +49,6 @@ struct mqtt_msg_s {
 };
 
 /*
-    LED state and state request structs
-*/
-struct led_state_s {
-    uint8_t brightness;
-    uint8_t color_temp;
-};
-
-struct led_state_req_s {
-    uint8_t power;
-    uint8_t brightness;
-    uint8_t brightness_valid;
-    uint8_t color_temp;
-    uint8_t color_temp_valid;
-};
-
-/*
     Constants
 */
 const float COLOR_TEMP_MAP_SCALE = 255.0 / (CONFIG_LED_STRIP_MAX_KELVIN - CONFIG_LED_STRIP_MIN_KELVIN);
@@ -80,7 +58,6 @@ const float COLOR_TEMP_MAP_SCALE = 255.0 / (CONFIG_LED_STRIP_MAX_KELVIN - CONFIG
 */
 static EventGroupHandle_t mqtt_event_group;
 static QueueHandle_t mqtt_msg_queue;
-static QueueHandle_t led_state_req_queue;
 
 static uint8_t sys_ready = 0;
 
@@ -338,14 +315,7 @@ static void process_mqtt_msg(const struct mqtt_msg_s *msg) {
     }
 
     /* Add the new LED state to the queue for processing */
-    BaseType_t stat = xQueueSend(
-        led_state_req_queue,
-        (void*) &led_state_req,
-        0
-    );
-    if (stat != pdTRUE) {
-        ESP_LOGE(DEBUG_TAG, "Failed to add new led state to queue");
-    }
+    update_led_state(&led_state_req);
 }
 
 /*!
@@ -361,232 +331,6 @@ static void mqtt_msg_handler_task(void *args) {
         );
         if (stat == pdTRUE) {
             process_mqtt_msg(&msg);
-        }
-    }
-}
-
-/*!
-    @brief Initialize the LED strip
-
-    @param led_strip Pointer to the LED strip handle that will be initialized
-*/
-static esp_err_t led_strip_init(led_strip_handle_t *led_strip) {
-    /* Create LED strip configuration */
-    led_strip_config_t strip_config = {
-        .strip_gpio_num = CONFIG_LED_STRIP_GPIO_PIN,
-        .max_leds = CONFIG_LED_STRIP_LED_COUNT,
-        .led_model = LED_MODEL_WS2812,
-        /* The color component format doesn't really matter much since we only
-            have 2 "colors" (cool white and warm white) */
-        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
-        .flags = {
-            .invert_out = 0,
-        }
-    };
-
-    /* Create LED strip driver configuration */
-    led_strip_rmt_config_t rmt_config = {
-        .clk_src = RMT_CLK_SRC_DEFAULT,
-        .resolution_hz = 10e6,
-        .mem_block_symbols = 0,
-        .flags = {
-            .with_dma = 0
-        }
-    };
-
-    /* Create the LED strip object */
-    esp_err_t err = led_strip_new_rmt_device(
-        &strip_config,
-        &rmt_config,
-        led_strip
-    );
-    return err;
-}
-
-/*!
-    @brief Set the LED strip warm and cool pixel values for the full strip
-    @param led_strip Handle for the LED strip that is to be updated
-    @param warm_white Value for the warm white color (0 - 255)
-    @param cool_white Value for the cool white color (0 - 255)
-*/
-static void set_led_strip(
-    led_strip_handle_t led_strip,
-    uint8_t warm_white,
-    uint8_t cool_white
-) {
-    for (int i = 0; i < CONFIG_LED_STRIP_LED_COUNT; i++) {
-        led_strip_set_pixel(
-            led_strip,
-            i,
-            warm_white,
-            cool_white,
-            0
-        );
-    }
-    led_strip_refresh(led_strip);
-}
-
-/*!
-    @brief Set the LED strip pixels based on a normalized brightness and color
-    temperature and apply gamma correction
-    @param brightness Normalized brightness (0.0 - 1.0)
-    @param color_temp Normalized color temperature (0.0 - 1.0)
-
-    @details The function assumes a gamma correction factor of 2. With that, the
-    basic white value calculations are as follows:
-        cool_white = 255 * brightness ^ 2 * color_temp
-        warm_white = 255 * brightness ^ 2 * (1 - color_temp)
-*/
-static void set_led_strip_from_norm_led_state(
-    led_strip_handle_t led_strip,
-    float brightness,
-    float color_temp
-) {
-    float b_2 = brightness * brightness;
-    float ww = b_2 * (1 - color_temp);
-    float cw = b_2 * color_temp;
-
-    uint8_t warm_white = roundf(255 * ww);
-    uint8_t cool_white = roundf(255 * cw);
-    set_led_strip(led_strip, warm_white, cool_white);
-}
-
-static void interpolate_led_strip(
-    led_strip_handle_t led_strip,
-    struct led_state_req_s *led_state_req,
-    struct led_state_s *current_led_state
-) {
-    /* Override the brightness if the LED is actually supposed to be off since
-        the brightness value doesn't change for that */
-    uint8_t actual_brightness = led_state_req->brightness;
-    if (led_state_req->power != 1) {
-        actual_brightness = 0;
-    }
-
-    /* Interpolating brightness and color temperature are 2 independent
-        operations, so the largest delta is used to determine how fast the
-        interpolation should be */
-    uint8_t delta_brightness = abs(actual_brightness - current_led_state->brightness);
-    uint8_t delta_color_temp = abs(led_state_req->color_temp - current_led_state->color_temp);
-    uint8_t max_delta = MAX(delta_brightness, delta_color_temp);
-
-    /* Pre-compute the normalized brightness and color temperature values used
-        for the linear interpolation because these values don't change during
-        the interpolation steps */
-    float b0_norm = current_led_state->brightness / 255.0;
-    float ct0_norm = current_led_state->color_temp / 255.0;
-    float b1_norm = actual_brightness / 255.0;
-    float ct1_norm = led_state_req->color_temp / 255.0;
-    float b1_0_norm = b1_norm - b0_norm;
-    float ct1_0_norm = ct1_norm - ct0_norm;
-    float b_i = b0_norm;
-    float ct_i = ct0_norm;
-    uint8_t interpolation_interrupted = 0;
-    for (int i = 1; i <= max_delta; i += 8) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-
-        /* Check if there's any new LED state requests in the queue. If there
-            are, then stop this interpolation so the next one can start
-            immediately. */
-        if (uxQueueMessagesWaiting(led_state_req_queue)) {
-            interpolation_interrupted = 1;
-            break;
-        }
-        
-        /* Calculate intermediate normalized brightness and color temperature */
-        float a = i / (float) max_delta;
-        a = sinf(M_PI_2 * a);
-        b_i = b0_norm + a * b1_0_norm;
-        ct_i = ct0_norm + a * ct1_0_norm;
-
-        set_led_strip_from_norm_led_state(
-            led_strip,
-            b_i,
-            ct_i
-        );
-    }
-
-    if (interpolation_interrupted) {
-        /* In the event that the interpolation is interrupted because of a new
-            LED state request, the LED state is updated with the last
-            interpolated value so that the next interpolation starts from where
-            this one left off */
-        current_led_state->brightness = 255 * b_i;
-        current_led_state->color_temp = 255 * ct_i;
-    } else {
-        /* If the interpolation completed, then set the LED strip and LED state
-            to the final brightness and color temperature values. This is done
-            because the interpolation loop end might not be a multiple of the
-            interpolation step. */
-        set_led_strip_from_norm_led_state(
-            led_strip,
-            b1_norm,
-            ct1_norm
-        );
-
-        current_led_state->brightness = actual_brightness;
-        current_led_state->color_temp = led_state_req->color_temp;
-    }
-}
-
-/*!
-    @brief Task that initializes and updates the LED strip when there's a new
-    desired state
-*/
-static void led_strip_task(void *args) {
-    /* Initialize the LED strip */
-    led_strip_handle_t led_strip;
-    esp_err_t err = led_strip_init(&led_strip);
-    if (err != ESP_OK) {
-        ESP_LOGE(DEBUG_TAG, "Error initializing the LED strip");
-        vTaskDelete(NULL);
-    }
-    led_strip_clear(led_strip);
-    
-    /* Provide initial values for the brightness and color temperature since
-        Home Assistant won't send these when the strip is simply turned on */
-    struct led_state_req_s led_state_req = {
-        .power = 0,
-        .brightness = INITIAL_BRIGHTNESS,
-        .brightness_valid = 1,
-        .color_temp = INITIAL_COLOR_TEMP,
-        .color_temp_valid = 1
-    };
-    struct led_state_s current_led_state = {
-        .brightness = INITIAL_BRIGHTNESS,
-        .color_temp = INITIAL_COLOR_TEMP
-    };
-    while (1) {
-        /* Block until there's a new requested LED state */
-        struct led_state_req_s new_led_state_req;
-        BaseType_t stat = xQueueReceive(
-            led_state_req_queue,
-            (void*) &new_led_state_req,
-            portMAX_DELAY
-        );
-        if (stat == pdTRUE) {
-            /* Update the LED state request with only the UPDATED state members.
-                This ensures that when the LED strip is turned off and turned
-                back on, it goes back to the brightness and color temperature it
-                was at prior to being turned off. */
-            if (new_led_state_req.power) {
-                led_state_req.power = 1;
-                if (new_led_state_req.brightness_valid) {
-                    led_state_req.brightness = new_led_state_req.brightness;
-                }
-                if (new_led_state_req.color_temp_valid) {
-                    led_state_req.color_temp = new_led_state_req.color_temp;
-                }
-            } else {
-                led_state_req.power = 0;
-            }
-
-            /* Interpolate the LED strip to the desired state */
-            interpolate_led_strip(
-                led_strip,
-                &led_state_req,
-                &current_led_state
-            );
         }
     }
 }
@@ -627,6 +371,15 @@ void app_main(void) {
         NULL
     );
 
+    /* Initialize the LED strip */
+    err = led_strip_init(
+        CONFIG_LED_STRIP_GPIO_PIN,
+        CONFIG_LED_STRIP_LED_COUNT
+    );
+    if (err != ESP_OK) {
+        return;
+    }
+
     /* Enable the RF switch and select the chip antenna as the RF path. If this
         isn't done, the WIFI will still work because of RF leakage, but it will
         work very poorly. */
@@ -651,6 +404,7 @@ void app_main(void) {
     /* Initialize the WIFI system */
     err = wifi_init(&wifi_config);
     if (err != ESP_OK) {
+
         return;
     }
 
@@ -665,7 +419,6 @@ void app_main(void) {
 
     /* Create queues */
     mqtt_msg_queue = xQueueCreate(8, sizeof(struct mqtt_msg_s));
-    led_state_req_queue = xQueueCreate(4, sizeof(struct led_state_req_s));
 
     /* Initialize the MQTT5 client */
     esp_mqtt_client_handle_t client;

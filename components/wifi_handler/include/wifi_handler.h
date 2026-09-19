@@ -1,9 +1,9 @@
 /*!
-    @file:	wifi.h
-    @brief:	Device WIFI management
+    @file:	wifi_handler.h
+    @brief:	Manage the WIFI station initialization and connection
 */
-#ifndef WIFI_H
-#define WIFI_H
+#ifndef WIFI_HANDLER_H
+#define WIFI_HANDLER_H
 
 #include "esp_err.h"
 #include "esp_wifi_types_generic.h"
