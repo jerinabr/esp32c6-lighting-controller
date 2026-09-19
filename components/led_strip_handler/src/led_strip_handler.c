@@ -24,6 +24,7 @@ struct led_state_s {
 
 static led_strip_handle_t led_strip;
 static QueueHandle_t state_req_queue;
+static uint32_t config_num_leds = 0;
 
 /*******************************************************************************
 -- PRIVATE FUNCTIONS --
@@ -79,7 +80,7 @@ static void set_led_strip(
     uint8_t warm_white,
     uint8_t cool_white
 ) {
-    for (int i = 0; i < CONFIG_LED_STRIP_LED_COUNT; i++) {
+    for (int i = 0; i < config_num_leds; i++) {
         led_strip_set_pixel(
             led_strip,
             i,
@@ -207,8 +208,10 @@ esp_err_t led_strip_init(uint32_t gpio_pin, uint32_t num_leds) {
     esp_err_t err = led_strip_configure(gpio_pin, num_leds);
     if (err != ESP_OK) {
         ESP_LOGE(DEBUG_TAG, "Error initializing the LED strip");
+        return err;
     }
-    return err;
+    config_num_leds = num_leds;
+    return ESP_OK;
 }
 
 /*!

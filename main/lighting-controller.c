@@ -28,6 +28,11 @@
 #define CHIP_ANTENNA_SEL    0
 
 /*
+    Number of LED strip segments in one strip
+*/
+#define NUM_LED_STRIP_SEGMENTS  4
+
+/*
     Event group status bits
 */
 #define MQTT_CLIENT_CONNECTED   BIT0
@@ -52,6 +57,16 @@ struct mqtt_msg_s {
     Constants
 */
 const float COLOR_TEMP_MAP_SCALE = 255.0 / (CONFIG_LED_STRIP_MAX_KELVIN - CONFIG_LED_STRIP_MIN_KELVIN);
+
+/* Define the number of LEDs in each strip segment. This will all be added
+    together to form the total strip length. I separated it to make it easier
+    for me to see how many LEDs I'm chaining together. */
+const uint32_t LED_STRIP_SEGMENT_LENGTHS[NUM_LED_STRIP_SEGMENTS] = {
+    9,
+    5,
+    7,
+    5
+};
 
 /*
     Variables
@@ -372,9 +387,13 @@ void app_main(void) {
     );
 
     /* Initialize the LED strip */
+    uint32_t num_leds = 0;
+    for (int i = 0; i < NUM_LED_STRIP_SEGMENTS; i++) {
+        num_leds += LED_STRIP_SEGMENT_LENGTHS[i];
+    }
     err = led_strip_init(
         CONFIG_LED_STRIP_GPIO_PIN,
-        CONFIG_LED_STRIP_LED_COUNT
+        num_leds
     );
     if (err != ESP_OK) {
         return;
