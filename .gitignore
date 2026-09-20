@@ -10,3 +10,4 @@ dependencies.lock
 # Folders
 .cache/
 build/
+.vscode/
