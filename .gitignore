@@ -8,6 +8,10 @@ dependencies.lock
 .clangd
 
 # Folders
+## Build Folder
 .cache/
 build/
+managed_components/
+
+## Misc
 .vscode/
