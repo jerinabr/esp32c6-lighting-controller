@@ -87,7 +87,7 @@ static const uint8_t GAMMA_LUT[256] = {
 };
 
 /*
-    Sin LUT to speed up interpolation
+    Sin LUT from 0 degrees to 90 degrees
 */
 static const uint8_t SIN_LUT_0_90[256] = {
 	0, 2, 3, 5,
@@ -320,11 +320,17 @@ static void interpolate_led_strip(
     uint8_t delta_color_temp = abs(led_state_req->color_temp - current_led_state->color_temp);
     uint8_t max_delta = MAX(delta_brightness, delta_color_temp);
 
-    /* Calculate the interpolation step with the formula
-        y = (4 * max_delta + 1023) / 128
-        This lets the step size be proportional to the max delta, but it ensures
-        that the smallest step size is 8 and the largest is 15. */
-    uint32_t interpolation_step = ((max_delta << 2) + 1024) >> 7;
+    /*
+        Calculate the interpolation step by remapping the max delta (0-255) to a
+        range of 4 to 7
+        
+        The linear equation for this is y = (1 / 64) * x + 4
+        Rewriting this for fixed point math, we get y = (x + 256) / 64
+
+        Since a division by 64 is just a bit-shift, this can be simplified even
+        further which gives us the resulting equation!
+    */
+    uint32_t interpolation_step = (max_delta + 256) >> 6;
 
     uint8_t b_i = current_led_state->brightness;
     uint8_t ct_i = current_led_state->color_temp;
@@ -359,7 +365,7 @@ static void interpolate_led_strip(
             ct_i
         );
 
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
     if (interpolation_interrupted) {
@@ -390,6 +396,13 @@ static void interpolate_led_strip(
 
 /*!
     @brief Initialize the LED strip and request queue
+
+    @param gpio_pin GPIO pin the LED strip is connected to
+    @param num_leds Number of LEDs in the strip
+
+    @return
+    - ESP_OK if the LED strip initialized successfully
+    - Error codes if the LED strip failed to initialize
 */
 esp_err_t led_strip_init(uint32_t gpio_pin, uint32_t num_leds) {
     state_req_queue = xQueueCreate(4, sizeof(struct led_state_req_s));
