@@ -17,14 +17,18 @@ The device subscribes to the topic "kitchen/under-cabinet-light/cmd" and it pars
     "temp": 3000
 }
 ```
-## power
+## JSON fields
+### power
 > Type: Integer
+> 
 0 (Off) or 1 (On)
 
-## brightness
+### brightness
 > Type: Integer
+> 
 0 - 255 where 0 is off and 255 is max brightness
 
-## temp
+### temp
 > Type: Integer
+> 
 Color temperature in Kelvin
