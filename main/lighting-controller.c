@@ -423,7 +423,6 @@ void app_main(void) {
     /* Initialize the WIFI system */
     err = wifi_init(&wifi_config);
     if (err != ESP_OK) {
-
         return;
     }
 
@@ -442,17 +441,6 @@ void app_main(void) {
     /* Initialize the MQTT5 client */
     esp_mqtt_client_handle_t client;
     mqtt5_client_init(&client);
-
-    /* Create publish configuration */
-    esp_mqtt5_publish_property_config_t pub_property = {
-        .payload_format_indicator = 1,
-        .message_expiry_interval = 1000,
-        .topic_alias = 0,
-        .response_topic = "topic/test/response",
-        .correlation_data = "123456",
-        .correlation_data_len = 6,
-    };
-    esp_mqtt5_client_set_publish_property(client, &pub_property);
 
     /* Subscribe to the control topic */
     esp_mqtt5_subscribe_property_config_t sub_property = {
